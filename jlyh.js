@@ -642,8 +642,15 @@ class UserInfo {
     // 信息获取类函数
 
     // 刷新Key函数
-    async refresh_token() {
+    async refresh_token(force = false) {
         try {
+            // token 有效期 1 小时以上，没必要每条命令都换一次。
+            // 用一个短 TTL 缓存（5 分钟）显著降低命令延时；出错时用 force=true 强制刷新。
+            const now = Date.now();
+            if (!force && this.token && this._tokenAt && (now - this._tokenAt) < 5 * 60 * 1000) {
+                return;
+            }
+
             let options = {
                 url: `https://galaxy-user-api.geely.com/api/v1/login/refresh?refreshToken=${this.refreshToken}`,
                 headers: this.getGetHeader(204179735, `/api/v1/login/refresh?refreshToken=${this.refreshToken}`),
@@ -654,6 +661,9 @@ class UserInfo {
                 // 简化成功消息，不再输出token详情
                 this.ckStatus = true;
                 this.token = result.data.centerTokenDto.token;
+                this._tokenAt = Date.now();
+                // 注意：不覆盖 this.refreshToken。青龙里的 jlyh 变量是固定的长期凭证，
+                // 原代码也从未更新它；擅自替换成响应里的值反而可能导致下次刷新失败。
                 
                 // 只在首次刷新token时显示日志
                 if (this.firstTokenRefresh) {
@@ -3440,8 +3450,9 @@ class UserInfo {
                     
                     if (success) {
                         $.DoubleLog(`✅命令执行成功: ${command} ${state}`);
-                        // 重新启动状态更新定时器
-                        await this.startStatusUpdateInterval();
+                        // 不要在这里 await startStatusUpdateInterval()：
+                        // 它会先跑一次完整 updateAndSendStatus（refresh_token + 拉状态 + 发送），
+                        // 把命令结果的推送排到几秒之后。先推状态，定时器稍后再起。
 
                         // 更新传感器状态
                         const sensorTopic = `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`;
@@ -3478,6 +3489,11 @@ class UserInfo {
                         }
                         await this.sendMqttMessage(sensorTopic, currentStatus);
 
+                        // 状态已推出，现在才恢复周期同步（不 await，避免阻塞命令循环）。
+                        // skipImmediate=true：跳过立即的云端同步，避免滞后旧值覆盖上面
+                        // 刚推的乐观状态；只装定时器，让 60 秒后按云端真值校准。
+                        this.startStatusUpdateInterval(true).catch(() => {});
+
                         // 注意：这里【不能】立即调 updateAndSendStatus。
                         // 云端状态字段（如 steerWhlHeatgAvlSts）更新有明显延迟：命令返回
                         // code 0 后 20~60 秒该字段才变。立刻拉取会拿到旧值，把上面刚推的
@@ -3504,14 +3520,18 @@ class UserInfo {
     }
 
     // 启动状态更新定时器
-    async startStatusUpdateInterval() {
+    async startStatusUpdateInterval(skipImmediate = false) {
         // 如果已经有定时器在运行，先清除
         if (this.statusUpdateInterval) {
             clearInterval(this.statusUpdateInterval);
         }
 
         // 立即执行一次状态更新
-        await this.updateAndSendStatus();
+        // skipImmediate=true 用于「命令刚执行完」的场景：此时刚推送过乐观状态，
+        // 立刻拉云端会拿到滞后旧值并把它覆盖掉（方向盘加热尤其明显）。
+        if (!skipImmediate) {
+            await this.updateAndSendStatus();
+        }
 
         // 设置定时器，按照配置的间隔时间更新状态
         this.statusUpdateInterval = setInterval(async () => {
