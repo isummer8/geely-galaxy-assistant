@@ -113,6 +113,9 @@ class UserInfo {
             'aconclose': '关闭空调',
             'steerwheelheaton': '打开方向盘加热',
             'steerwheelheatoff': '关闭方向盘加热',
+            'opentrunk': '打开后备箱',
+            'closetrunk': '关闭后备箱',
+            'engineon': '远程启动引擎',
             'rapidheat': '极速升温',
             'rapidcool': '极速降温',
             'photo': '获取驻车图片',
@@ -243,7 +246,11 @@ class UserInfo {
             seatheat_fl: () => this.vehicleStatus.vehicleClimateStatus?.drvHeatSts === '1',
             seatheat_fr: () => this.vehicleStatus.vehicleClimateStatus?.passHeatingSts === '1',
             seatvent_fl: () => this.vehicleStatus.vehicleClimateStatus?.drvVentSts === '1',
-            seatvent_fr: () => this.vehicleStatus.vehicleClimateStatus?.passVentSts === '1'
+            seatvent_fr: () => this.vehicleStatus.vehicleClimateStatus?.passVentSts === '1',
+            // 后备箱：trunkOpenStatus 0=关 1=开
+            trunk: () => this.vehicleStatus.vehicleDoorCoverStatus?.trunkOpenStatus === '1',
+            // 引擎：engineStatus 字符串 'engine-on' / 'engine-off'
+            engine: () => this.vehicleStatus.vehicleEngineStatus?.engineStatus === 'engine-on'
         };
     }
 
@@ -1100,9 +1107,12 @@ class UserInfo {
     async controlDoor(action) {
         try {
             // 根据动作设置参数
+            // 后备箱：实测 door 端点必须 target=null + value='trunk'（target 传字符串会 B00006）
             const params = {
-                'opendoor': { type: 1, name: '打开' },
-                'closedoor': { type: 2, name: '关闭' }
+                'opendoor': { type: 1, target: null, value: null, name: '打开' },
+                'closedoor': { type: 2, target: null, value: null, name: '关闭' },
+                'opentrunk': { type: 1, target: null, value: 'trunk', name: '打开' },
+                'closetrunk': { type: 2, target: null, value: 'trunk', name: '关闭' }
             }[action];
 
             if (!params) {
@@ -1117,9 +1127,10 @@ class UserInfo {
                 "password": null,
                 "platform": "2.0",
                 "position": 0,
-                "target": null,
+                "target": params.target,
                 "type": params.type,
                 "udId": null,
+                "value": params.value,
                 "vin": this.vehicleInfo.vin
             };
 
@@ -1150,6 +1161,54 @@ class UserInfo {
     async opendoor() {await this.controlDoor('opendoor');}
     //关闭车锁函数
     async closedoor() {await this.controlDoor('closedoor');}
+
+    // 后备箱：解锁 / 上锁（走 door 端点 target=trunk）
+    async opentrunk() {await this.controlDoor('opentrunk');}
+    async closetrunk() {await this.controlDoor('closetrunk');}
+
+    // 远程启动引擎（对应能力清单 remote_start_engine）
+    // 实测：noEngine 端点必须传完整的 climate 风格请求体（带 conditioner/duration/
+    // heat/heatLevel/level/temp/ventilation 等字段，值全为 null），只传 value 会
+    // 报 VC501105「value参数类型异常」。
+    async engineon() {
+        try {
+            const body = {
+                "clientType": 2,
+                "conditioner": null,
+                "duration": 90,
+                "heat": null,
+                "heatLevel": null,
+                "level": null,
+                "password": null,
+                "platform": "2.0",
+                "temp": null,
+                "type": 1,
+                "udId": null,
+                "value": null,
+                "ventilation": null,
+                "vin": this.vehicleInfo.vin
+            };
+            const path = '/vc/app/v1/vehicle/control/noEngine';
+            let options = {
+                url: `https://galaxy-vc.geely.com${path}`,
+                headers: this.getPostHeader(204373120, path, JSON.stringify(body)),
+                body: JSON.stringify(body)
+            };
+            let result = await httpRequest(options);
+            if (result.code == 0) {
+                $.DoubleLog(`✅启动引擎成功！`);
+                Notify = 1;
+                return true;
+            }
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} 启动引擎失败！`);
+            console.log("⚠️失败原因:", result);
+            Notify = 1;
+            return false;
+        } catch (e) {
+            console.log(e);
+            return false;
+        }
+    }
 
     //闪灯鸣笛函数
     async search() {
@@ -2142,7 +2201,10 @@ class UserInfo {
                 seatheat_fl_lv: this.vehicleStatus.vehicleClimateStatus?.drvHeatLv,
                 seatheat_fr_lv: this.vehicleStatus.vehicleClimateStatus?.passHeatLv,
                 seatvent_fl_lv: this.vehicleStatus.vehicleClimateStatus?.drvVentDetail,
-                seatvent_fr_lv: this.vehicleStatus.vehicleClimateStatus?.passVentDetail
+                seatvent_fr_lv: this.vehicleStatus.vehicleClimateStatus?.passVentDetail,
+                // ---- 后备箱 / 引擎 ----
+                trunk_state: this.checkStatus('trunk'),
+                engine_state: this.checkStatus('engine')
             };
 
             // 保存最后的传感器数据用于后续更新
@@ -2758,6 +2820,36 @@ class UserInfo {
                     device: {
                         identifiers: [`geely_${this.vehicleInfo.vin}`]
                     }
+                },
+                trunk: {
+                    name: "后备箱",
+                    icon: "mdi:car-back",
+                    command_topic: `homeassistant/switch/geely_${this.vehicleInfo.vin}/trunk/set`,
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.trunk_state }}",
+                    payload_on: "ON",
+                    payload_off: "OFF",
+                    state_on: "ON",
+                    state_off: "OFF",
+                    unique_id: `geely_${this.vehicleInfo.vin}_trunk`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                engine: {
+                    name: "远程启动引擎",
+                    icon: "mdi:engine",
+                    command_topic: `homeassistant/switch/geely_${this.vehicleInfo.vin}/engine/set`,
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.engine_state }}",
+                    payload_on: "ON",
+                    payload_off: "OFF",
+                    state_on: "ON",
+                    state_off: "OFF",
+                    unique_id: `geely_${this.vehicleInfo.vin}_engine`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
                 }
             };
 
@@ -3260,6 +3352,12 @@ class UserInfo {
                             case 'seatventfr':
                                 success = await this.seatventfr();
                                 break;
+                            case 'trunk':
+                                success = await this.opentrunk();
+                                break;
+                            case 'engine':
+                                success = await this.engineon();
+                                break;
                         }
                     } else if (state === 'OFF') {
                         switch(command) {
@@ -3305,6 +3403,14 @@ class UserInfo {
                                 break;
                             case 'seatventfr':
                                 success = await this.controlSeat('vent', 'fr', 0);
+                                break;
+                            case 'trunk':
+                                success = await this.closetrunk();
+                                break;
+                            case 'engine':
+                                // 云端未提供熄火接口，OFF 视为无操作
+                                $.DoubleLog(`ℹ️ 远程熄火暂不支持（云端无对应服务）`);
+                                success = false;
                                 break;
                         }
                     }
