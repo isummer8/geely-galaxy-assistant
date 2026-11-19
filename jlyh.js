@@ -2040,8 +2040,12 @@ class UserInfo {
                 await this.initMqtt();
             }
 
+            // discovery/config 主题必须 retain：否则 HA 一重启就收不到配置，
+            // 实体随之消失（状态主题不 retain，避免离线后显示陈旧值）。
+            const retain = /\/config$/.test(topic);
+
             return new Promise((resolve, reject) => {
-                this.mqttClient.publish(topic, JSON.stringify(message), (err) => {
+                this.mqttClient.publish(topic, JSON.stringify(message), { retain }, (err) => {
                     if (err) {
                         $.DoubleLog(`❌ ${getFormattedTimestamp()} MQTT消息发送失败: ${err.message}`);
                         reject(err);
