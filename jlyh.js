@@ -240,8 +240,11 @@ class UserInfo {
             purifier: () => this.vehicleStatus.vehicleClimateStatus?.airBlowerActive === true,
             sunroof: () => this.vehicleStatus.vehicleDoorCoverStatus?.sunroofStatus === '1',  // 1表示打开(ON)，2表示关闭(OFF)
             sunshade: () => this.vehicleStatus.vehicleDoorCoverStatus?.sunshadeStatus === '1',  // 1表示打开(ON)，2表示关闭(OFF)
-            // 方向盘加热：steerWhlHeatgAvlSts 1=On 2=Off（0=未配备）
-            steerwheel: () => this.vehicleStatus.vehicleClimateStatus?.steerWhlHeatgAvlSts === '1',
+            // 方向盘加热：云端 steerWhlHeatgAvlSts 的取值与 APVP 枚举【相反】。
+            // 实测依据：车机 PAA 已超时、方向盘确认关闭时该字段返回 1；开启时返回 2。
+            // （APVP 的 306184868 枚举写作 1=On 2=Off，但云端接口映射不一致，以实测为准。）
+            // 注：drvHeatSts 等座椅字段是 1=On 2=Off，与方向盘不同，勿混用。
+            steerwheel: () => this.vehicleStatus.vehicleClimateStatus?.steerWhlHeatgAvlSts === '2',
             // 座椅加热/通风：drv/passHeatSts、drv/passVentSts 1=On 2=Off
             seatheat_fl: () => this.vehicleStatus.vehicleClimateStatus?.drvHeatSts === '1',
             seatheat_fr: () => this.vehicleStatus.vehicleClimateStatus?.passHeatingSts === '1',
