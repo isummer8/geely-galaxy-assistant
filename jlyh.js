@@ -111,6 +111,8 @@ class UserInfo {
             'defrostclose': '关闭除霜',
             'aconopen': '打开空调',
             'aconclose': '关闭空调',
+            'steerwheelheaton': '打开方向盘加热',
+            'steerwheelheatoff': '关闭方向盘加热',
             'rapidheat': '极速升温',
             'rapidcool': '极速降温',
             'photo': '获取驻车图片',
@@ -234,7 +236,9 @@ class UserInfo {
             defrost: () => this.vehicleStatus.vehicleClimateStatus?.defrostActive === true,
             purifier: () => this.vehicleStatus.vehicleClimateStatus?.airBlowerActive === true,
             sunroof: () => this.vehicleStatus.vehicleDoorCoverStatus?.sunroofStatus === '1',  // 1表示打开(ON)，2表示关闭(OFF)
-            sunshade: () => this.vehicleStatus.vehicleDoorCoverStatus?.sunshadeStatus === '1'  // 1表示打开(ON)，2表示关闭(OFF)
+            sunshade: () => this.vehicleStatus.vehicleDoorCoverStatus?.sunshadeStatus === '1',  // 1表示打开(ON)，2表示关闭(OFF)
+            // 方向盘加热：steerWhlHeatgAvlSts 1=On 2=Off（0=未配备）
+            steerwheel: () => this.vehicleStatus.vehicleClimateStatus?.steerWhlHeatgAvlSts === '1'
         };
     }
 
@@ -1306,6 +1310,8 @@ class UserInfo {
     async controlClimate(action, temperature = 25) {
         try {
             // 根据动作设置参数
+            // conditioner: 1=AC 2=除霜
+            // 方向盘加热不走这个端点 —— 走 controlTemperature 的 paaSw，见下方 steerwheelheat*
             const params = {
                 'defrostopen': { type: 1, conditioner: 2, name: '打开除霜' },
                 'defrostclose': { type: 2, conditioner: 2, name: '关闭除霜' },
@@ -1386,6 +1392,16 @@ class UserInfo {
         await this.controlClimate('defrostclose');
     }
 
+    // 打开方向盘加热（走 temperature 端点 + paaSw，实测有效）
+    async steerwheelheaton() {
+        await this.controlTemperature('steerwheelheaton');
+    }
+
+    // 关闭方向盘加热
+    async steerwheelheatoff() {
+        await this.controlTemperature('steerwheelheatoff');
+    }
+
     //温度控制通用函数
     async controlTemperature(action) {
         try {
@@ -1408,6 +1424,31 @@ class UserInfo {
                     ventilation: [1, 2],
                     ventilationValue: 3,
                     name: '极速降温'
+                },
+                // 方向盘加热：走 temperature 端点，靠 paaSw 控制（1=开 0=关）
+                // 2026-11-19 实测：paaSw:1 后 steerWhlHeatgAvlSts 由 2(Off) 变 1(On)
+                // 注意 paaAc 必须为 false，否则会顺带开空调
+                'steerwheelheaton': {
+                    type: 1,
+                    temp: null,
+                    heat: null,
+                    heatValue: null,
+                    ventilation: null,
+                    ventilationValue: null,
+                    paaSw: 1,
+                    paaAc: false,
+                    name: '打开方向盘加热'
+                },
+                'steerwheelheatoff': {
+                    type: 2,
+                    temp: null,
+                    heat: null,
+                    heatValue: null,
+                    ventilation: null,
+                    ventilationValue: null,
+                    paaSw: 0,
+                    paaAc: false,
+                    name: '关闭方向盘加热'
                 }
             }[action];
 
@@ -1422,11 +1463,11 @@ class UserInfo {
                 "dayOfWeek": null,
                 "duration": 90,
                 "paa": 0,
-                "paaAc": true,
+                "paaAc": params.paaAc === undefined ? true : params.paaAc,
                 "paaAcTemp": params.temp,
                 "paaHeat": params.heat,
                 "paaHeatValue": params.heatValue,
-                "paaSw": null,
+                "paaSw": params.paaSw === undefined ? null : params.paaSw,
                 "paaVentilation": params.ventilation,
                 "paaVentilationValue": params.ventilationValue,
                 "paaVlt": params.ventilation !== null,
@@ -1950,6 +1991,7 @@ class UserInfo {
                 purifier_state: this.checkStatus('purifier'),
                 sunroof_state: this.checkStatus('sunroof'),
                 sunshade_state: this.checkStatus('sunshade'),
+                steerwheel_state: this.checkStatus('steerwheel'),
                 ac_temp: this.acTemp || 25,  // 添加空调温度状态
                 
                 // 添加新的状态字段
@@ -2312,6 +2354,21 @@ class UserInfo {
                     state_on: "ON",
                     state_off: "OFF",
                     unique_id: `geely_${this.vehicleInfo.vin}_sunshade`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                steerwheel: {
+                    name: "方向盘加热",
+                    icon: "mdi:steering",
+                    command_topic: `homeassistant/switch/geely_${this.vehicleInfo.vin}/steerwheel/set`,
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.steerwheel_state }}",
+                    payload_on: "ON",
+                    payload_off: "OFF",
+                    state_on: "ON",
+                    state_off: "OFF",
+                    unique_id: `geely_${this.vehicleInfo.vin}_steerwheel`,
                     device: {
                         identifiers: [`geely_${this.vehicleInfo.vin}`]
                     }
@@ -2735,6 +2792,10 @@ class UserInfo {
                                 await this.sunshadeopen();
                                 success = true;
                                 break;
+                            case 'steerwheel':
+                                await this.steerwheelheaton();
+                                success = true;
+                                break;
                         }
                     } else if (state === 'OFF') {
                         switch(command) {
@@ -2766,6 +2827,10 @@ class UserInfo {
                                 await this.sunshadeclose();
                                 success = true;
                                 break;
+                            case 'steerwheel':
+                                await this.steerwheelheatoff();
+                                success = true;
+                                break;
                         }
                     }
                     
@@ -2784,7 +2849,8 @@ class UserInfo {
                             defrost_state: command === 'defrost' ? state : this.checkStatus('defrost'),
                             purifier_state: command === 'purifier' ? state : this.checkStatus('purifier'),
                             sunroof_state: command === 'sunroof' ? state : this.checkStatus('sunroof'),
-                            sunshade_state: command === 'sunshade' ? state : this.checkStatus('sunshade')
+                            sunshade_state: command === 'sunshade' ? state : this.checkStatus('sunshade'),
+                            steerwheel_state: command === 'steerwheel' ? state : this.checkStatus('steerwheel')
                         };
                         await this.sendMqttMessage(sensorTopic, currentStatus);
                         
