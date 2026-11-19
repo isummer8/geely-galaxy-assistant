@@ -69,10 +69,10 @@ function getFormattedTimestamp() {
 
 // MQTT配置
 const mqttConfig = {
-    host: 'mqtt://', // MQTT服务器地址
+    host: 'mqtt://127.0.0.1', // MQTT服务器地址
     port: 1883,                 // MQTT服务器端口
-    username: 'XXXXX',               // MQTT用户名
-    password: 'XXXXX',               // MQTT密码
+    username: '',               // MQTT用户名
+    password: '',               // MQTT密码
     clientId: 'jlyh_geely_galaxy', // 固定客户端ID
     updateInterval: 60         // MQTT状态更新间隔，单位：秒
 };
@@ -238,7 +238,12 @@ class UserInfo {
             sunroof: () => this.vehicleStatus.vehicleDoorCoverStatus?.sunroofStatus === '1',  // 1表示打开(ON)，2表示关闭(OFF)
             sunshade: () => this.vehicleStatus.vehicleDoorCoverStatus?.sunshadeStatus === '1',  // 1表示打开(ON)，2表示关闭(OFF)
             // 方向盘加热：steerWhlHeatgAvlSts 1=On 2=Off（0=未配备）
-            steerwheel: () => this.vehicleStatus.vehicleClimateStatus?.steerWhlHeatgAvlSts === '1'
+            steerwheel: () => this.vehicleStatus.vehicleClimateStatus?.steerWhlHeatgAvlSts === '1',
+            // 座椅加热/通风：drv/passHeatSts、drv/passVentSts 1=On 2=Off
+            seatheat_fl: () => this.vehicleStatus.vehicleClimateStatus?.drvHeatSts === '1',
+            seatheat_fr: () => this.vehicleStatus.vehicleClimateStatus?.passHeatingSts === '1',
+            seatvent_fl: () => this.vehicleStatus.vehicleClimateStatus?.drvVentSts === '1',
+            seatvent_fr: () => this.vehicleStatus.vehicleClimateStatus?.passVentSts === '1'
         };
     }
 
@@ -598,6 +603,15 @@ class UserInfo {
                         i++; // 跳过桩号参数
                     }
                     await this[methodName](pileId);
+                } else if (['seatheatfl', 'seatheatfr', 'seatventfl', 'seatventfr'].includes(methodName)
+                           && typeof this[methodName] === 'function') {
+                    // 座椅加热/通风支持追加档位参数（0=关 1~3）
+                    let lv = 3;
+                    if (i + 1 < features.length && /^[0-3]$/.test(features[i + 1])) {
+                        lv = parseInt(features[i + 1], 10);
+                        i++; // 跳过档位参数
+                    }
+                    await this[methodName](lv);
                 } else if (methodName && typeof this[methodName] === 'function') {
                     await this[methodName]();
                     // 只在MQTT启用且执行特定功能时发送状态
@@ -1310,8 +1324,6 @@ class UserInfo {
     async controlClimate(action, temperature = 25) {
         try {
             // 根据动作设置参数
-            // conditioner: 1=AC 2=除霜
-            // 方向盘加热不走这个端点 —— 走 controlTemperature 的 paaSw，见下方 steerwheelheat*
             const params = {
                 'defrostopen': { type: 1, conditioner: 2, name: '打开除霜' },
                 'defrostclose': { type: 2, conditioner: 2, name: '关闭除霜' },
@@ -1392,16 +1404,6 @@ class UserInfo {
         await this.controlClimate('defrostclose');
     }
 
-    // 打开方向盘加热（走 temperature 端点 + paaSw，实测有效）
-    async steerwheelheaton() {
-        await this.controlTemperature('steerwheelheaton');
-    }
-
-    // 关闭方向盘加热
-    async steerwheelheatoff() {
-        await this.controlTemperature('steerwheelheatoff');
-    }
-
     //温度控制通用函数
     async controlTemperature(action) {
         try {
@@ -1425,31 +1427,27 @@ class UserInfo {
                     ventilationValue: 3,
                     name: '极速降温'
                 },
-                // 方向盘加热：走 temperature 端点，靠 paaSw 控制（1=开 0=关）
-                // 2026-11-19 实测：paaSw:1 后 steerWhlHeatgAvlSts 由 2(Off) 变 1(On)
-                // 注意 paaAc 必须为 false，否则会顺带开空调
+                // ── 方向盘加热 ──
+                // 走 temperature 端点，靠 paaSw 控制（1=开 0=关）。
+                // 2026-11-19 实测：paaSw:1 → steerWhlHeatgAvlSts 2(Off)→1(On)，paaSw:0 反向 restore。
+                // paaAc 必须 false，否则会顺带开空调。
                 'steerwheelheaton': {
-                    type: 1,
-                    temp: null,
-                    heat: null,
-                    heatValue: null,
-                    ventilation: null,
-                    ventilationValue: null,
-                    paaSw: 1,
-                    paaAc: false,
-                    name: '打开方向盘加热'
+                    type: 1, temp: null, heat: null, heatValue: null,
+                    ventilation: null, ventilationValue: null,
+                    paaSw: 1, paaAc: false, name: '打开方向盘加热'
                 },
                 'steerwheelheatoff': {
-                    type: 2,
-                    temp: null,
-                    heat: null,
-                    heatValue: null,
-                    ventilation: null,
-                    ventilationValue: null,
-                    paaSw: 0,
-                    paaAc: false,
-                    name: '关闭方向盘加热'
-                }
+                    type: 2, temp: null, heat: null, heatValue: null,
+                    ventilation: null, ventilationValue: null,
+                    paaSw: 0, paaAc: false, name: '关闭方向盘加热'
+                },
+                // ── 座椅加热（paaHeat 位置数组 + paaHeatValue 档位 1~3，0=关）──
+                // 位置：1=主驾 2=副驾（rapidheat 用 [1,2] 表示前排双座）
+                'seatheatfl': { type: 1, temp: null, heat: [1], heatValue: 0, ventilation: null, ventilationValue: null, paaAc: false, name: '主驾座椅加热' },
+                'seatheatfr': { type: 1, temp: null, heat: [2], heatValue: 0, ventilation: null, ventilationValue: null, paaAc: false, name: '副驾座椅加热' },
+                // ── 座椅通风（paaVentilation 位置数组 + paaVentilationValue 档位 1~3）──
+                'seatventfl': { type: 1, temp: null, heat: null, heatValue: null, ventilation: [1], ventilationValue: 0, paaAc: false, name: '主驾座椅通风' },
+                'seatventfr': { type: 1, temp: null, heat: null, heatValue: null, ventilation: [2], ventilationValue: 0, paaAc: false, name: '副驾座椅通风' }
             }[action];
 
             if (!params) {
@@ -1470,7 +1468,7 @@ class UserInfo {
                 "paaSw": params.paaSw === undefined ? null : params.paaSw,
                 "paaVentilation": params.ventilation,
                 "paaVentilationValue": params.ventilationValue,
-                "paaVlt": params.ventilation !== null,
+                "paaVlt": params.ventilation !== null && params.ventilation !== undefined,
                 "paaVltDuration": 60,
                 "paaVltPos": null,
                 "password": null,
@@ -1497,10 +1495,12 @@ class UserInfo {
             if (result.code == 0) {
                 $.DoubleLog(`✅${params.name}成功！`);
                 Notify = 1;
+                return true;
             } else {
                 $.DoubleLog(`❌ ${getFormattedTimestamp()} ${params.name}失败！`);
                 console.log("⚠️失败原因:", result);
                 Notify = 1;
+                return false;
             }
         } catch (e) {
             console.log(e);
@@ -1515,6 +1515,103 @@ class UserInfo {
     // 极速降温函数
     async rapidcool() {
         await this.controlTemperature('rapidcool');
+    }
+
+    // ── 方向盘加热 ──
+    async steerwheelheaton() {
+        await this.controlTemperature('steerwheelheaton');
+    }
+    async steerwheelheatoff() {
+        await this.controlTemperature('steerwheelheatoff');
+    }
+
+    // ── 座椅加热/通风 ──
+    // level: 0=关 1~3=档位；不传时默认 3 档（与 rapidheat 一致）
+    async seatheatfl(level = 3) {
+        await this.controlSeat('heat', 'fl', level);
+    }
+    async seatheatfr(level = 3) {
+        await this.controlSeat('heat', 'fr', level);
+    }
+    async seatventfl(level = 3) {
+        await this.controlSeat('vent', 'fl', level);
+    }
+    async seatventfr(level = 3) {
+        await this.controlSeat('vent', 'fr', level);
+    }
+
+    /**
+     * 座椅加热/通风统一控制
+     * @param {string} kind  'heat' 加热 | 'vent' 通风
+     * @param {string} side  'fl' 主驾 | 'fr' 副驾
+     * @param {number} level 0=关，1~3=档位
+     */
+    async controlSeat(kind, side, level = 3) {
+        const lv = Math.max(0, Math.min(3, parseInt(level, 10) || 0));
+        const pos = side === 'fl' ? 1 : 2;   // 1=主驾 2=副驾
+        const label = `${side === 'fl' ? '主驾' : '副驾'}座椅${kind === 'heat' ? '加热' : '通风'}`;
+
+        // level=0 表示关闭：type 用 2，档位字段传 0
+        const params = {
+            clientType: 2,
+            type: lv === 0 ? 2 : 1,
+            temp: null,
+            heat: kind === 'heat' ? [pos] : null,
+            heatValue: kind === 'heat' ? lv : null,
+            ventilation: kind === 'vent' ? [pos] : null,
+            ventilationValue: kind === 'vent' ? lv : null,
+            paaSw: null,
+            paaAc: false,
+            name: lv === 0 ? `关闭${label}` : `${label} ${lv}档`,
+        };
+
+        const body = {
+            clientType: 2,
+            dayOfWeek: null,
+            duration: 90,
+            paa: 0,
+            paaAc: params.paaAc,
+            paaAcTemp: params.temp,
+            paaHeat: params.heat,
+            paaHeatValue: params.heatValue,
+            paaSw: params.paaSw,
+            paaVentilation: params.ventilation,
+            paaVentilationValue: params.ventilationValue,
+            paaVlt: params.ventilation !== null,
+            paaVltDuration: 60,
+            paaVltPos: null,
+            password: null,
+            platform: '2.0',
+            scheduledTime: Date.now(),
+            startTimeOfDay: null,
+            timerActivation: null,
+            timerId: null,
+            type: params.type,
+            udId: null,
+            vin: this.vehicleInfo.vin,
+        };
+
+        try {
+            const path = '/vc/app/v1/vehicle/control/temperature';
+            const options = {
+                url: `https://galaxy-vc.geely.com${path}`,
+                headers: this.getPostHeader(204373120, path, JSON.stringify(body)),
+                body: JSON.stringify(body),
+            };
+            const result = await httpRequest(options);
+            if (result.code == 0) {
+                $.DoubleLog(`✅${params.name}成功！`);
+                Notify = 1;
+                return true;
+            }
+            $.DoubleLog(`❌ ${getFormattedTimestamp()} ${params.name}失败！`);
+            console.log('⚠️失败原因:', result);
+            Notify = 1;
+            return false;
+        } catch (e) {
+            console.log(e);
+            return false;
+        }
     }
 
     // 获取驻车图片函数
@@ -1991,7 +2088,6 @@ class UserInfo {
                 purifier_state: this.checkStatus('purifier'),
                 sunroof_state: this.checkStatus('sunroof'),
                 sunshade_state: this.checkStatus('sunshade'),
-                steerwheel_state: this.checkStatus('steerwheel'),
                 ac_temp: this.acTemp || 25,  // 添加空调温度状态
                 
                 // 添加新的状态字段
@@ -2006,7 +2102,43 @@ class UserInfo {
                 engine_status: this.vehicleStatus.vehicleEngineStatus?.engineStatus,
                 trunk_lock_status: this.vehicleStatus.vehicleDoorCoverStatus?.trunkLockStatus,
                 // 最新SOC目标电量
-                target_soc: this.lastSoc || null
+                target_soc: this.lastSoc || null,
+                // ---- 扩展状态（云端原始字段）----
+                fuel_level_pct: this.vehicleStatus.basicVehicleStatus?.fuelLevelPct,
+                fuel_liters: this.vehicleStatus.basicVehicleStatus?.fuelLevel,
+                fuel_range: this.vehicleStatus.basicVehicleStatus?.distanceToEmpty,
+                tyre_fl: this.vehicleStatus.vehicleTyreStatus?.tyreStatusDriver,
+                tyre_fr: this.vehicleStatus.vehicleTyreStatus?.tyreStatusPassenger,
+                tyre_rl: this.vehicleStatus.vehicleTyreStatus?.tyreStatusDriverRear,
+                tyre_rr: this.vehicleStatus.vehicleTyreStatus?.tyreStatusPassengerRear,
+                tyre_temp_fl: this.vehicleStatus.vehicleTyreStatus?.tyreTempDriver,
+                tyre_temp_fr: this.vehicleStatus.vehicleTyreStatus?.tyreTempPassenger,
+                tyre_temp_rl: this.vehicleStatus.vehicleTyreStatus?.tyreTempDriverRear,
+                tyre_temp_rr: this.vehicleStatus.vehicleTyreStatus?.tyreTempPassengerRear,
+                window_fl: this.vehicleStatus.vehicleWindowStatus?.winPosDriver,
+                window_fr: this.vehicleStatus.vehicleWindowStatus?.winPosPassenger,
+                window_rl: this.vehicleStatus.vehicleWindowStatus?.winPosDriverRear,
+                window_rr: this.vehicleStatus.vehicleWindowStatus?.winPosPassengerRear,
+                sunroof_pos: this.vehicleStatus.vehicleWindowStatus?.sunroofPos,
+                curtain_pos: this.vehicleStatus.vehicleWindowStatus?.curtainPos,
+                door_driver_open: this.vehicleStatus.vehicleDoorCoverStatus?.doorOpenStatusDriver === '1' ? 'ON' : 'OFF',
+                door_passenger_open: this.vehicleStatus.vehicleDoorCoverStatus?.doorOpenStatusPassenger === '1' ? 'ON' : 'OFF',
+                door_rear_left_open: this.vehicleStatus.vehicleDoorCoverStatus?.doorOpenStatusDriverRear === '1' ? 'ON' : 'OFF',
+                door_rear_right_open: this.vehicleStatus.vehicleDoorCoverStatus?.doorOpenStatusPassengerRear === '1' ? 'ON' : 'OFF',
+                trunk_open: this.vehicleStatus.vehicleDoorCoverStatus?.trunkOpenStatus === '1' ? 'ON' : 'OFF',
+                battery_maint: this.switchStatus?.batteryMaintenanceActive === '1' ? 'ON' : 'OFF',
+                charger_connection: this.vehicleStatus.vehicleBatteryStatus?.statusOfChargerConnection,
+                // ---- 方向盘 / 座椅 加热通风状态 ----
+                steerwheel_state: this.checkStatus('steerwheel'),
+                seatheat_fl_state: this.checkStatus('seatheat_fl'),
+                seatheat_fr_state: this.checkStatus('seatheat_fr'),
+                seatvent_fl_state: this.checkStatus('seatvent_fl'),
+                seatvent_fr_state: this.checkStatus('seatvent_fr'),
+                // 档位原始值（0=关 1~3）
+                seatheat_fl_lv: this.vehicleStatus.vehicleClimateStatus?.drvHeatLv,
+                seatheat_fr_lv: this.vehicleStatus.vehicleClimateStatus?.passHeatLv,
+                seatvent_fl_lv: this.vehicleStatus.vehicleClimateStatus?.drvVentDetail,
+                seatvent_fr_lv: this.vehicleStatus.vehicleClimateStatus?.passVentDetail
             };
 
             // 保存最后的传感器数据用于后续更新
@@ -2222,6 +2354,196 @@ class UserInfo {
                 }
             };
 
+            // ---- 扩展传感器（油量/胎压/车窗等）----
+            const extraSensorConfigs = {
+                fuel_level_pct: {
+                    name: "油量",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.fuel_level_pct }}",
+                    unit_of_measurement: "%",
+                    icon: "mdi:fuel",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_fuel_level_pct`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                fuel_liters: {
+                    name: "油量（升）",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.fuel_liters }}",
+                    unit_of_measurement: "L",
+                    icon: "mdi:fuel",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_fuel_liters`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                fuel_range: {
+                    name: "油续航",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.fuel_range }}",
+                    unit_of_measurement: "km",
+                    icon: "mdi:gas-station",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_fuel_range`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                tyre_fl: {
+                    name: "左前胎压",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.tyre_fl }}",
+                    unit_of_measurement: "kPa",
+                    device_class: "pressure",
+                    state_class: "measurement",
+                    icon: "mdi:tire",
+                    unique_id: `geely_${this.vehicleInfo.vin}_tyre_fl`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                tyre_fr: {
+                    name: "右前胎压",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.tyre_fr }}",
+                    unit_of_measurement: "kPa",
+                    device_class: "pressure",
+                    state_class: "measurement",
+                    icon: "mdi:tire",
+                    unique_id: `geely_${this.vehicleInfo.vin}_tyre_fr`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                tyre_rl: {
+                    name: "左后胎压",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.tyre_rl }}",
+                    unit_of_measurement: "kPa",
+                    device_class: "pressure",
+                    state_class: "measurement",
+                    icon: "mdi:tire",
+                    unique_id: `geely_${this.vehicleInfo.vin}_tyre_rl`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                tyre_rr: {
+                    name: "右后胎压",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.tyre_rr }}",
+                    unit_of_measurement: "kPa",
+                    device_class: "pressure",
+                    state_class: "measurement",
+                    icon: "mdi:tire",
+                    unique_id: `geely_${this.vehicleInfo.vin}_tyre_rr`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                tyre_temp_fl: {
+                    name: "左前胎温",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.tyre_temp_fl }}",
+                    unit_of_measurement: "°C",
+                    device_class: "temperature",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_tyre_temp_fl`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                tyre_temp_fr: {
+                    name: "右前胎温",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.tyre_temp_fr }}",
+                    unit_of_measurement: "°C",
+                    device_class: "temperature",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_tyre_temp_fr`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                tyre_temp_rl: {
+                    name: "左后胎温",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.tyre_temp_rl }}",
+                    unit_of_measurement: "°C",
+                    device_class: "temperature",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_tyre_temp_rl`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                tyre_temp_rr: {
+                    name: "右后胎温",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.tyre_temp_rr }}",
+                    unit_of_measurement: "°C",
+                    device_class: "temperature",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_tyre_temp_rr`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                window_fl: {
+                    name: "左前车窗",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.window_fl }}",
+                    unit_of_measurement: "%",
+                    icon: "mdi:car-window",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_window_fl`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                window_fr: {
+                    name: "右前车窗",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.window_fr }}",
+                    unit_of_measurement: "%",
+                    icon: "mdi:car-window",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_window_fr`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                window_rl: {
+                    name: "左后车窗",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.window_rl }}",
+                    unit_of_measurement: "%",
+                    icon: "mdi:car-window",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_window_rl`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                window_rr: {
+                    name: "右后车窗",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.window_rr }}",
+                    unit_of_measurement: "%",
+                    icon: "mdi:car-window",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_window_rr`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                sunroof_pos: {
+                    name: "天窗开度",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.sunroof_pos }}",
+                    unit_of_measurement: "%",
+                    icon: "mdi:car-door",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_sunroof_pos`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                curtain_pos: {
+                    name: "遮阳帘开度",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.curtain_pos }}",
+                    unit_of_measurement: "%",
+                    icon: "mdi:window-shutter",
+                    state_class: "measurement",
+                    unique_id: `geely_${this.vehicleInfo.vin}_curtain_pos`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                charger_connection: {
+                    name: "充电枪连接状态",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.charger_connection }}",
+                    icon: "mdi:ev-plug-type2",
+                    unique_id: `geely_${this.vehicleInfo.vin}_charger_connection`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                }
+            };
+            for (const [sensorName, config] of Object.entries(extraSensorConfigs)) {
+                const configTopic = `homeassistant/sensor/geely_${this.vehicleInfo.vin}/${sensorName}/config`;
+                await this.sendMqttMessage(configTopic, config);
+            }
+
             // 发送传感器配置
             for (const [sensorName, config] of Object.entries(sensorConfigs)) {
                 const configTopic = `homeassistant/sensor/geely_${this.vehicleInfo.vin}/${sensorName}/config`;
@@ -2372,6 +2694,66 @@ class UserInfo {
                     device: {
                         identifiers: [`geely_${this.vehicleInfo.vin}`]
                     }
+                },
+                seatheat_fl: {
+                    name: "主驾座椅加热",
+                    icon: "mdi:car-seat-heater",
+                    command_topic: `homeassistant/switch/geely_${this.vehicleInfo.vin}/seatheatfl/set`,
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.seatheat_fl_state }}",
+                    payload_on: "ON",
+                    payload_off: "OFF",
+                    state_on: "ON",
+                    state_off: "OFF",
+                    unique_id: `geely_${this.vehicleInfo.vin}_seatheat_fl`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                seatheat_fr: {
+                    name: "副驾座椅加热",
+                    icon: "mdi:car-seat-heater",
+                    command_topic: `homeassistant/switch/geely_${this.vehicleInfo.vin}/seatheatfr/set`,
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.seatheat_fr_state }}",
+                    payload_on: "ON",
+                    payload_off: "OFF",
+                    state_on: "ON",
+                    state_off: "OFF",
+                    unique_id: `geely_${this.vehicleInfo.vin}_seatheat_fr`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                seatvent_fl: {
+                    name: "主驾座椅通风",
+                    icon: "mdi:car-seat-cooler",
+                    command_topic: `homeassistant/switch/geely_${this.vehicleInfo.vin}/seatventfl/set`,
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.seatvent_fl_state }}",
+                    payload_on: "ON",
+                    payload_off: "OFF",
+                    state_on: "ON",
+                    state_off: "OFF",
+                    unique_id: `geely_${this.vehicleInfo.vin}_seatvent_fl`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
+                },
+                seatvent_fr: {
+                    name: "副驾座椅通风",
+                    icon: "mdi:car-seat-cooler",
+                    command_topic: `homeassistant/switch/geely_${this.vehicleInfo.vin}/seatventfr/set`,
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.seatvent_fr_state }}",
+                    payload_on: "ON",
+                    payload_off: "OFF",
+                    state_on: "ON",
+                    state_off: "OFF",
+                    unique_id: `geely_${this.vehicleInfo.vin}_seatvent_fr`,
+                    device: {
+                        identifiers: [`geely_${this.vehicleInfo.vin}`]
+                    }
                 }
             };
 
@@ -2380,6 +2762,73 @@ class UserInfo {
                 const configTopic = `homeassistant/switch/geely_${this.vehicleInfo.vin}/${switchName}/config`;
                 await this.sendMqttMessage(configTopic, config);
                 
+            }
+
+            // ---- 扩展二进制传感器（车门/后备箱/电池维温）----
+            const extraBinaryConfigs = {
+                door_driver_open: {
+                    name: "主驾车门",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.door_driver_open }}",
+                    payload_on: "ON", payload_off: "OFF",
+                    device_class: "door",
+                    icon: "mdi:car-door",
+                    unique_id: `geely_${this.vehicleInfo.vin}_door_driver_open`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                door_passenger_open: {
+                    name: "副驾车门",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.door_passenger_open }}",
+                    payload_on: "ON", payload_off: "OFF",
+                    device_class: "door",
+                    icon: "mdi:car-door",
+                    unique_id: `geely_${this.vehicleInfo.vin}_door_passenger_open`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                door_rear_left_open: {
+                    name: "左后车门",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.door_rear_left_open }}",
+                    payload_on: "ON", payload_off: "OFF",
+                    device_class: "door",
+                    icon: "mdi:car-door",
+                    unique_id: `geely_${this.vehicleInfo.vin}_door_rear_left_open`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                door_rear_right_open: {
+                    name: "右后车门",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.door_rear_right_open }}",
+                    payload_on: "ON", payload_off: "OFF",
+                    device_class: "door",
+                    icon: "mdi:car-door",
+                    unique_id: `geely_${this.vehicleInfo.vin}_door_rear_right_open`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                trunk_open: {
+                    name: "后备箱",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.trunk_open }}",
+                    payload_on: "ON", payload_off: "OFF",
+                    device_class: "opening",
+                    icon: "mdi:car-back",
+                    unique_id: `geely_${this.vehicleInfo.vin}_trunk_open`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                },
+                battery_maint: {
+                    name: "电池维温状态",
+                    state_topic: `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`,
+                    value_template: "{{ value_json.battery_maint }}",
+                    payload_on: "ON", payload_off: "OFF",
+                    icon: "mdi:battery-heart-variant",
+                    unique_id: `geely_${this.vehicleInfo.vin}_battery_maint`,
+                    device: { identifiers: [`geely_${this.vehicleInfo.vin}`] }
+                }
+            };
+            for (const [sensorName, config] of Object.entries(extraBinaryConfigs)) {
+                const configTopic = `homeassistant/binary_sensor/geely_${this.vehicleInfo.vin}/${sensorName}/config`;
+                await this.sendMqttMessage(configTopic, config);
             }
 
             // 添加按钮配置
@@ -2793,8 +3242,19 @@ class UserInfo {
                                 success = true;
                                 break;
                             case 'steerwheel':
-                                await this.steerwheelheaton();
-                                success = true;
+                                success = await this.steerwheelheaton();
+                                break;
+                            case 'seatheatfl':
+                                success = await this.seatheatfl();
+                                break;
+                            case 'seatheatfr':
+                                success = await this.seatheatfr();
+                                break;
+                            case 'seatventfl':
+                                success = await this.seatventfl();
+                                break;
+                            case 'seatventfr':
+                                success = await this.seatventfr();
                                 break;
                         }
                     } else if (state === 'OFF') {
@@ -2828,8 +3288,19 @@ class UserInfo {
                                 success = true;
                                 break;
                             case 'steerwheel':
-                                await this.steerwheelheatoff();
-                                success = true;
+                                success = await this.steerwheelheatoff();
+                                break;
+                            case 'seatheatfl':
+                                success = await this.controlSeat('heat', 'fl', 0);
+                                break;
+                            case 'seatheatfr':
+                                success = await this.controlSeat('heat', 'fr', 0);
+                                break;
+                            case 'seatventfl':
+                                success = await this.controlSeat('vent', 'fl', 0);
+                                break;
+                            case 'seatventfr':
+                                success = await this.controlSeat('vent', 'fr', 0);
                                 break;
                         }
                     }
@@ -2849,8 +3320,7 @@ class UserInfo {
                             defrost_state: command === 'defrost' ? state : this.checkStatus('defrost'),
                             purifier_state: command === 'purifier' ? state : this.checkStatus('purifier'),
                             sunroof_state: command === 'sunroof' ? state : this.checkStatus('sunroof'),
-                            sunshade_state: command === 'sunshade' ? state : this.checkStatus('sunshade'),
-                            steerwheel_state: command === 'steerwheel' ? state : this.checkStatus('steerwheel')
+                            sunshade_state: command === 'sunshade' ? state : this.checkStatus('sunshade')
                         };
                         await this.sendMqttMessage(sensorTopic, currentStatus);
                         
