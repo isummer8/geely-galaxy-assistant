@@ -1563,6 +1563,7 @@ class UserInfo {
             }
         } catch (e) {
             console.log(e);
+            return false;
         }
     }
 
@@ -1578,25 +1579,25 @@ class UserInfo {
 
     // ── 方向盘加热 ──
     async steerwheelheaton() {
-        await this.controlTemperature('steerwheelheaton');
+        return await this.controlTemperature('steerwheelheaton');
     }
     async steerwheelheatoff() {
-        await this.controlTemperature('steerwheelheatoff');
+        return await this.controlTemperature('steerwheelheatoff');
     }
 
     // ── 座椅加热/通风 ──
     // level: 0=关 1~3=档位；不传时默认 3 档（与 rapidheat 一致）
     async seatheatfl(level = 3) {
-        await this.controlSeat('heat', 'fl', level);
+        return await this.controlSeat('heat', 'fl', level);
     }
     async seatheatfr(level = 3) {
-        await this.controlSeat('heat', 'fr', level);
+        return await this.controlSeat('heat', 'fr', level);
     }
     async seatventfl(level = 3) {
-        await this.controlSeat('vent', 'fl', level);
+        return await this.controlSeat('vent', 'fl', level);
     }
     async seatventfr(level = 3) {
-        await this.controlSeat('vent', 'fr', level);
+        return await this.controlSeat('vent', 'fr', level);
     }
 
     /**
@@ -2190,7 +2191,9 @@ class UserInfo {
                 door_rear_right_open: this.vehicleStatus.vehicleDoorCoverStatus?.doorOpenStatusPassengerRear === '1' ? 'ON' : 'OFF',
                 trunk_open: this.vehicleStatus.vehicleDoorCoverStatus?.trunkOpenStatus === '1' ? 'ON' : 'OFF',
                 battery_maint: this.switchStatus?.batteryMaintenanceActive === '1' ? 'ON' : 'OFF',
-                charger_connection: this.vehicleStatus.vehicleBatteryStatus?.statusOfChargerConnection,
+                // 充电枪连接状态：云端字段名是 disChargeConnectStatus（原补丁写的
+                // statusOfChargerConnection 不存在，导致该实体一直拿不到值）
+                charger_connection: this.vehicleStatus.vehicleBatteryStatus?.disChargeConnectStatus,
                 // ---- 方向盘 / 座椅 加热通风状态 ----
                 steerwheel_state: this.checkStatus('steerwheel'),
                 seatheat_fl_state: this.checkStatus('seatheat_fl'),
@@ -3119,9 +3122,19 @@ class UserInfo {
     // 初始化MQTT连接
     async initMqtt() {
         try {
+            // 防重入：重连中/连接中直接返回，避免 sendMqttMessage 反复触发
+            // initMqtt → end(true) → on('close') 置 null → 再 initMqtt 的死循环。
+            if (this._mqttInitPending) {
+                return;
+            }
+            if (this.mqttClient && this.mqttClient.connected) {
+                return;
+            }
+            this._mqttInitPending = true;
+
             if (this.mqttClient) {
                 // 如果已经有连接，先断开旧连接
-                this.mqttClient.end(true);
+                try { this.mqttClient.end(true); } catch (e) { /* ignore */ }
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 this.mqttClient = null;
                 $.DoubleLog(`🔄断开旧MQTT连接，准备重新连接`);
@@ -3149,6 +3162,7 @@ class UserInfo {
 
             // 连接成功事件
             this.mqttClient.on('connect', async () => {
+                this._mqttInitPending = false;
                 $.DoubleLog(`✅MQTT连接成功`);
                 
                 // 订阅主题
@@ -3183,22 +3197,26 @@ class UserInfo {
             // 错误处理
             this.mqttClient.on('error', (err) => {
                 $.DoubleLog(`❌ ${getFormattedTimestamp()} MQTT连接错误: ${err.message}`);
+                this._mqttInitPending = false;
             });
 
             // 断开连接处理
             this.mqttClient.on('close', () => {
                 $.DoubleLog(`MQTT连接关闭`);
-                
+                // 允许后续 sendMqttMessage 触发重连
+                this._mqttInitPending = false;
+
                 // 清理定时器
                 if (this.statusUpdateInterval) {
                     clearInterval(this.statusUpdateInterval);
                     this.statusUpdateInterval = null;
                 }
             });
-            
+
             // 连接结束事件
             this.mqttClient.on('end', () => {
                 $.DoubleLog(`MQTT连接已结束`);
+                this._mqttInitPending = false;
                 this.mqttClient = null;
             });
 
@@ -3422,22 +3440,49 @@ class UserInfo {
 
                         // 更新传感器状态
                         const sensorTopic = `homeassistant/sensor/geely_${this.vehicleInfo.vin}/state`;
+                        // 合并到上一份完整状态里发送：sensorTopic 是一份完整状态负载，
+                        // 只发部分字段会把胎压/油量等其余字段从 topic 上抹掉
+                        // （HA 收到缺字段的 payload 会让对应实体变 unknown）。
                         const currentStatus = {
+                            ...(this.lastSensorData || {}),
                             // 使用统一的状态检测方法，但当前命令使用临时状态
+                            // 注意：这里必须覆盖所有 switch 实体，否则命令成功后 HomeKit
+                            // 收不到新状态，会一直显示旧值（表现为「按了没反应」）。
                             sentry_mode: command === 'sentry' ? state : this.checkStatus('sentry'),
                             door_state: command === 'door' ? state : this.checkStatus('door'),
                             ac_state: command === 'ac' ? state : this.checkStatus('ac'),
                             defrost_state: command === 'defrost' ? state : this.checkStatus('defrost'),
                             purifier_state: command === 'purifier' ? state : this.checkStatus('purifier'),
                             sunroof_state: command === 'sunroof' ? state : this.checkStatus('sunroof'),
-                            sunshade_state: command === 'sunshade' ? state : this.checkStatus('sunshade')
+                            sunshade_state: command === 'sunshade' ? state : this.checkStatus('sunshade'),
+                            steerwheel_state: command === 'steerwheel' ? state : this.checkStatus('steerwheel'),
+                            seatheat_fl_state: command === 'seatheatfl' ? state : this.checkStatus('seatheat_fl'),
+                            seatheat_fr_state: command === 'seatheatfr' ? state : this.checkStatus('seatheat_fr'),
+                            seatvent_fl_state: command === 'seatventfl' ? state : this.checkStatus('seatvent_fl'),
+                            seatvent_fr_state: command === 'seatventfr' ? state : this.checkStatus('seatvent_fr'),
+                            trunk_state: command === 'trunk' ? state : this.checkStatus('trunk'),
+                            engine_state: command === 'engine' ? state : this.checkStatus('engine')
                         };
+                        this.lastSensorData = currentStatus;
+
+                        // 方向盘加热：锁定 75 秒，期间 checkStatus('steerwheel') 返回命令结果，
+                        // 不让存在延迟的云端字段把状态冲掉（PAA 90 秒后自动结束，届时解锁）。
+                        if (command === 'steerwheel') {
+                            this._swhLockVal = state;
+                            this._swhLockUntil = Date.now() + 75000;
+                        }
                         await this.sendMqttMessage(sensorTopic, currentStatus);
-                        
-                        // 等待车辆状态更新
-                        await new Promise(resolve => setTimeout(resolve, 5000));
-                        // 更新并发送状态
-                        await this.updateAndSendStatus();
+
+                        // 注意：这里【不能】立即调 updateAndSendStatus。
+                        // 云端状态字段（如 steerWhlHeatgAvlSts）更新有明显延迟：命令返回
+                        // code 0 后 20~60 秒该字段才变。立刻拉取会拿到旧值，把上面刚推的
+                        // 乐观状态覆盖掉 —— 表现就是 HomeKit 里开关「弹回去 / 要按两次」。
+                        //
+                        // 处理：60 秒后再同步一次云端真值。这个时间点既能覆盖 PAA 的
+                        // 90 秒自动超时前的状态，又避开了字段刚下发时的滞后窗口。
+                        setTimeout(() => {
+                            this.updateAndSendStatus().catch(() => {});
+                        }, 60000);
                     } else {
                         $.DoubleLog(`❌ ${getFormattedTimestamp()} 未知命令或状态: ${command} ${state}`);
                     }
@@ -3507,6 +3552,12 @@ class UserInfo {
         if (!check) {
             $.DoubleLog(`❌ ${getFormattedTimestamp()} 未知的状态检测类型: ${type}`);
             return false;
+        }
+        // 慢更新字段保护：方向盘加热（PAA 服务，90 秒自动超时）在命令下发后
+        // 云端状态字段有 20~60 秒延迟。这段时间内沿用上一条命令的结果，
+        // 避免 60 秒周期同步把刚设置的状态覆盖成旧值。
+        if (type === 'steerwheel' && this._swhLockUntil && Date.now() < this._swhLockUntil) {
+            return this._swhLockVal || 'OFF';
         }
         return check() ? 'ON' : 'OFF';
     }
